@@ -1,0 +1,512 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Primitive Helpers
+    // =========================================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOptionalId(id) {
+      return id is string && (id == '' || isValidId(id));
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'laharbalakrishnagowda@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isAuthorized() {
+      return isVerifiedUser() && (
+        isAdmin() ||
+        exists(/databases/$(database)/documents/authorizedStaff/$(request.auth.uid))
+      );
+    }
+
+    // =========================================================================
+    // Validation Blueprints (Anti-Update-Gap)
+    // =========================================================================
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'ward', 'roleLabel', 'isDirectoryVisible', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'ward', 'roleLabel', 'isDirectoryVisible', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80
+        && data.ward is string && data.ward.size() >= 1 && data.ward.size() <= 40
+        && data.roleLabel in ['Public Citizen', 'Authorized Officer', 'Administrative Staff']
+        && data.isDirectoryVisible is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateContact(data) {
+      return data.keys().hasAll(['uid', 'email', 'phone', 'address', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'phone', 'address', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() <= 160
+        && data.phone is string && data.phone.size() <= 20
+        && data.address is string && data.address.size() <= 200
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRoleGrant(data, expectedRole) {
+      return data.keys().hasAll(['uid', 'role', 'grantedBy', 'designation', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'role', 'grantedBy', 'designation', 'createdAt'])
+        && isValidId(data.uid)
+        && data.role == expectedRole
+        && isValidId(data.grantedBy)
+        && data.grantedBy == request.auth.uid
+        && data.designation is string && data.designation.size() >= 2 && data.designation.size() <= 80
+        && data.createdAt is timestamp;
+    }
+
+    function isValidServiceRequest(data) {
+      return data.keys().hasAll([
+          'trackingCode', 'title', 'description', 'category', 'ward', 'landmark',
+          'status', 'priority', 'photoUrl', 'resolutionPhotoUrl',
+          'reporterUid', 'reporterName', 'assignedOfficerUid', 'assignedOfficerName',
+          'officerNotes', 'estimatedBudget', 'monthKey', 'visibility', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'trackingCode', 'title', 'description', 'category', 'ward', 'landmark',
+          'status', 'priority', 'photoUrl', 'resolutionPhotoUrl',
+          'reporterUid', 'reporterName', 'assignedOfficerUid', 'assignedOfficerName',
+          'officerNotes', 'estimatedBudget', 'monthKey', 'visibility', 'createdAt', 'updatedAt',
+          'lat', 'lng'
+        ])
+        && data.trackingCode is string && data.trackingCode.size() >= 4 && data.trackingCode.size() <= 24 && data.trackingCode.matches('^[A-Z0-9\\-]+$')
+        && data.title is string && data.title.size() >= 5 && data.title.size() <= 120
+        && data.description is string && data.description.size() >= 10 && data.description.size() <= 1000
+        && data.category in ['Water Supply', 'Roads & Drainage', 'Street Lighting', 'Sanitation', 'Electricity', 'Public Health']
+        && data.ward is string && data.ward.size() >= 2 && data.ward.size() <= 40
+        && data.landmark is string && data.landmark.size() >= 2 && data.landmark.size() <= 120
+        && data.status in ['Submitted', 'Verified', 'In Progress', 'Resolved', 'Closed']
+        && data.priority in ['Low', 'Medium', 'High', 'Urgent']
+        && data.photoUrl is string && data.photoUrl.size() <= 100000
+        && data.resolutionPhotoUrl is string && data.resolutionPhotoUrl.size() <= 100000
+        && isValidId(data.reporterUid)
+        && data.reporterName is string && data.reporterName.size() >= 2 && data.reporterName.size() <= 80
+        && isOptionalId(data.assignedOfficerUid)
+        && data.assignedOfficerName is string && data.assignedOfficerName.size() <= 80
+        && data.officerNotes is string && data.officerNotes.size() <= 600
+        && data.estimatedBudget is number && data.estimatedBudget >= 0 && data.estimatedBudget <= 50000000
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && data.visibility == 'public'
+        && (!('lat' in data) || (data.lat is number && data.lat >= -90 && data.lat <= 90))
+        && (!('lng' in data) || (data.lng is number && data.lng >= -180 && data.lng <= 180))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidServiceUpdate(data, pathRequestId) {
+      return data.keys().hasAll([
+          'requestId', 'authorUid', 'authorName', 'authorRole',
+          'previousStatus', 'newStatus', 'note', 'visibility', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'requestId', 'authorUid', 'authorName', 'authorRole',
+          'previousStatus', 'newStatus', 'note', 'visibility', 'createdAt'
+        ])
+        && isValidId(data.requestId) && data.requestId == pathRequestId
+        && isValidId(data.authorUid) && data.authorUid == request.auth.uid
+        && data.authorName is string && data.authorName.size() >= 2 && data.authorName.size() <= 80
+        && data.authorRole in ['Public Citizen', 'Authorized Officer', 'Administrative Staff']
+        && data.previousStatus in ['Submitted', 'Verified', 'In Progress', 'Resolved', 'Closed']
+        && data.newStatus in ['Submitted', 'Verified', 'In Progress', 'Resolved', 'Closed']
+        && data.note is string && data.note.size() >= 3 && data.note.size() <= 500
+        && data.visibility == 'public'
+        && data.createdAt is timestamp;
+    }
+
+    function isValidMonthlyReport(data) {
+      return data.keys().hasAll([
+          'monthKey', 'monthLabel', 'totalRequests', 'resolvedCount', 'inProgressCount',
+          'verifiedCount', 'pendingCount', 'resolutionRate', 'totalSanctionedBudget',
+          'topCategory', 'summaryText', 'actionPlan', 'publishedByUid', 'publishedByName',
+          'isPublished', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'monthKey', 'monthLabel', 'totalRequests', 'resolvedCount', 'inProgressCount',
+          'verifiedCount', 'pendingCount', 'resolutionRate', 'totalSanctionedBudget',
+          'topCategory', 'summaryText', 'actionPlan', 'publishedByUid', 'publishedByName',
+          'isPublished', 'createdAt', 'updatedAt'
+        ])
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && data.monthLabel is string && data.monthLabel.size() >= 4 && data.monthLabel.size() <= 40
+        && data.totalRequests is number && data.totalRequests >= 0 && data.totalRequests <= 100000
+        && data.resolvedCount is number && data.resolvedCount >= 0 && data.resolvedCount <= 100000
+        && data.inProgressCount is number && data.inProgressCount >= 0 && data.inProgressCount <= 100000
+        && data.verifiedCount is number && data.verifiedCount >= 0 && data.verifiedCount <= 100000
+        && data.pendingCount is number && data.pendingCount >= 0 && data.pendingCount <= 100000
+        && data.resolutionRate is number && data.resolutionRate >= 0 && data.resolutionRate <= 100
+        && data.totalSanctionedBudget is number && data.totalSanctionedBudget >= 0 && data.totalSanctionedBudget <= 500000000
+        && data.topCategory is string && data.topCategory.size() <= 60
+        && data.summaryText is string && data.summaryText.size() >= 10 && data.summaryText.size() <= 1500
+        && data.actionPlan is string && data.actionPlan.size() <= 1000
+        && isValidId(data.publishedByUid)
+        && data.publishedByName is string && data.publishedByName.size() >= 2 && data.publishedByName.size() <= 80
+        && data.isPublished is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll([
+          'recipientUid', 'senderUid', 'requestId', 'title', 'message', 'type', 'isRead', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'recipientUid', 'senderUid', 'requestId', 'title', 'message', 'type', 'isRead', 'createdAt'
+        ])
+        && isValidId(data.recipientUid)
+        && isValidId(data.senderUid)
+        && isOptionalId(data.requestId)
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 120
+        && data.message is string && data.message.size() >= 5 && data.message.size() <= 400
+        && data.type in ['status_update', 'assignment', 'report_published', 'public_notice']
+        && data.isRead is bool
+        && data.createdAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection Rules
+    // =========================================================================
+
+    // 1. Public Non-PII User Directory
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (
+        request.auth.uid == userId ||
+        resource.data.isDirectoryVisible == true
+      );
+      allow list: if isSignedIn() && resource.data.isDirectoryVisible == true;
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == userId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (request.auth.uid == userId && incoming().roleLabel == 'Public Citizen') ||
+          isAdmin()
+        );
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            request.auth.uid == userId &&
+            incoming().roleLabel == existing().roleLabel &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'ward', 'isDirectoryVisible', 'updatedAt'])
+          ) ||
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'ward', 'roleLabel', 'isDirectoryVisible', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+
+      // 1b. Strictly Isolated Private PII Subcollection
+      match /private/{docId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(docId) && (
+          request.auth.uid == userId || isAdmin()
+        );
+        allow list: if false;
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'contact'
+          && isValidUserPrivateContact(incoming())
+          && incoming().uid == userId
+          && incoming().updatedAt == request.time
+          && (request.auth.uid == userId || isAdmin());
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'contact'
+          && isValidUserPrivateContact(incoming())
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phone', 'address', 'updatedAt'])
+          && (request.auth.uid == userId || isAdmin());
+
+        allow delete: if isAdmin() && isValidId(userId) && isValidId(docId);
+      }
+    }
+
+    // 2. Authoritative Admin Role Grants
+    match /admins/{adminUid} {
+      allow get: if isSignedIn() && isValidId(adminUid) && (
+        request.auth.uid == adminUid || isAdmin()
+      );
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidId(adminUid)
+        && isValidRoleGrant(incoming(), 'admin')
+        && incoming().uid == adminUid
+        && incoming().createdAt == request.time
+        && isAdmin();
+
+      allow update: if isVerifiedUser()
+        && isValidId(adminUid)
+        && isValidRoleGrant(incoming(), 'admin')
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['designation'])
+        && isAdmin();
+
+      allow delete: if isAdmin() && isValidId(adminUid);
+    }
+
+    // 3. Authoritative Field Officer Role Grants
+    match /authorizedStaff/{staffUid} {
+      allow get: if isSignedIn() && isValidId(staffUid) && (
+        request.auth.uid == staffUid || isAdmin()
+      );
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidId(staffUid)
+        && isValidRoleGrant(incoming(), 'authorized')
+        && incoming().uid == staffUid
+        && incoming().createdAt == request.time
+        && isAdmin();
+
+      allow update: if isVerifiedUser()
+        && isValidId(staffUid)
+        && isValidRoleGrant(incoming(), 'authorized')
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['designation'])
+        && isAdmin();
+
+      allow delete: if isAdmin() && isValidId(staffUid);
+    }
+
+    // 4. Villager Service Requests (Civic Issue Tracker)
+    match /serviceRequests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && (
+        resource.data.visibility == 'public' ||
+        resource.data.reporterUid == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.visibility == 'public' ||
+        resource.data.reporterUid == request.auth.uid
+      );
+
+      allow create: if isVerifiedUser()
+        && isValidId(requestId)
+        && isValidServiceRequest(incoming())
+        && incoming().reporterUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (
+            incoming().status == 'Submitted' &&
+            incoming().estimatedBudget == 0 &&
+            incoming().assignedOfficerUid == '' &&
+            incoming().assignedOfficerName == '' &&
+            incoming().officerNotes == '' &&
+            incoming().resolutionPhotoUrl == ''
+          ) ||
+          isAdmin()
+        );
+
+      allow update: if isVerifiedUser()
+        && isValidId(requestId)
+        && isValidServiceRequest(incoming())
+        && incoming().trackingCode == existing().trackingCode
+        && incoming().reporterUid == existing().reporterUid
+        && incoming().reporterName == existing().reporterName
+        && incoming().visibility == existing().visibility
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Administrative Staff full governance override (including terminal Closed state)
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'category', 'ward', 'landmark',
+              'status', 'priority', 'photoUrl', 'resolutionPhotoUrl',
+              'assignedOfficerUid', 'assignedOfficerName', 'officerNotes',
+              'estimatedBudget', 'monthKey', 'updatedAt'
+            ])
+          ) ||
+          // Action 2: Authorized Field Officer workflow progression (blocked if Closed)
+          (
+            existing().status != 'Closed' &&
+            isAuthorized() &&
+            incoming().status in ['Submitted', 'Verified', 'In Progress', 'Resolved'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'priority', 'assignedOfficerUid', 'assignedOfficerName',
+              'officerNotes', 'resolutionPhotoUrl', 'estimatedBudget', 'updatedAt'
+            ])
+          ) ||
+          // Action 3: Reporter minor edit while still in Submitted state
+          (
+            existing().status == 'Submitted' &&
+            existing().reporterUid == request.auth.uid &&
+            incoming().status == 'Submitted' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'landmark', 'photoUrl', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(requestId);
+
+      // 4b. Service Request Timeline Updates (Master Gate)
+      match /updates/{updateId} {
+        allow get: if isSignedIn() && isValidId(requestId) && isValidId(updateId) && (
+          resource.data.visibility == 'public' &&
+          exists(/databases/$(database)/documents/serviceRequests/$(requestId))
+        );
+        allow list: if isSignedIn()
+          && resource.data.requestId == requestId
+          && resource.data.visibility == 'public';
+
+        allow create: if isVerifiedUser()
+          && isValidId(requestId)
+          && isValidId(updateId)
+          && isValidServiceUpdate(incoming(), requestId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/serviceRequests/$(requestId))
+          && (
+            isAuthorized() ||
+            (
+              get(/databases/$(database)/documents/serviceRequests/$(requestId)).data.reporterUid == request.auth.uid &&
+              incoming().authorRole == 'Public Citizen' &&
+              incoming().previousStatus == 'Submitted' &&
+              incoming().newStatus == 'Submitted'
+            )
+          );
+
+        allow update: if false;
+        allow delete: if isAdmin() && isValidId(requestId) && isValidId(updateId);
+      }
+    }
+
+    // 5. Monthly Transparency Reports
+    match /monthlyReports/{reportId} {
+      allow get: if isSignedIn() && isValidId(reportId) && (
+        resource.data.isPublished == true || isAdmin()
+      );
+      allow list: if isSignedIn() && resource.data.isPublished == true;
+
+      allow create: if isVerifiedUser()
+        && isValidId(reportId)
+        && isValidMonthlyReport(incoming())
+        && incoming().publishedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isAdmin();
+
+      allow update: if isVerifiedUser()
+        && isValidId(reportId)
+        && isValidMonthlyReport(incoming())
+        && incoming().monthKey == existing().monthKey
+        && incoming().publishedByUid == request.auth.uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'monthLabel', 'totalRequests', 'resolvedCount', 'inProgressCount',
+          'verifiedCount', 'pendingCount', 'resolutionRate', 'totalSanctionedBudget',
+          'topCategory', 'summaryText', 'actionPlan', 'publishedByUid',
+          'publishedByName', 'isPublished', 'updatedAt'
+        ])
+        && isAdmin();
+
+      allow delete: if isAdmin() && isValidId(reportId);
+    }
+
+    // 6. Real-Time Notifications & Village Notices
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && isValidId(notificationId) && (
+        resource.data.recipientUid == request.auth.uid ||
+        resource.data.recipientUid == 'all' ||
+        isAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.recipientUid == request.auth.uid ||
+        resource.data.recipientUid == 'all'
+      );
+
+      allow create: if isVerifiedUser()
+        && isValidId(notificationId)
+        && isValidNotification(incoming())
+        && incoming().senderUid == request.auth.uid
+        && incoming().isRead == false
+        && incoming().createdAt == request.time
+        && (
+          // Self-receipt confirmation when a citizen logs a new issue
+          (incoming().recipientUid == request.auth.uid && incoming().type == 'status_update') ||
+          // Authorized officer notifying a specific villager about their issue
+          (isAuthorized() && incoming().recipientUid != 'all' && incoming().type in ['status_update', 'assignment']) ||
+          // Administrative staff can notify any villager or broadcast to 'all'
+          isAdmin()
+        );
+
+      allow update: if isVerifiedUser()
+        && isValidId(notificationId)
+        && isValidNotification(incoming())
+        && incoming().recipientUid == existing().recipientUid
+        && incoming().senderUid == existing().senderUid
+        && incoming().createdAt == existing().createdAt
+        && (
+          (
+            existing().recipientUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['isRead'])
+          ) ||
+          (
+            isAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'title', 'message'])
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(notificationId) && (
+        resource.data.recipientUid == request.auth.uid || isAdmin()
+      );
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "GramSetu — Gram Panchayat Civic Portal",
+  "description": "Mobile-first Gram Panchayat service request portal with Public, Authorized Officer, and Administrative Staff modes, villager photo reporting, real-time notifications, and monthly transparency reports.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
